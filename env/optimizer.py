@@ -1,0 +1,1838 @@
+import tqdm
+
+from env.Population import *
+import time
+from env import cec_test_func
+import numpy as np
+import copy
+
+
+class NL_SHADE_RSP:
+    def __init__(self, dim):
+        self.pb = 0.4   # rate of best individuals in mutation
+        self.pa = 0.5   # rate of selecting individual from archive
+        self.dim = dim  # dimension of problem
+
+    def evaluate(self, problem, u):
+        cost = problem.func(u) - problem.optimum
+        cost[cost < 1e-8] = 0.0
+        return cost
+
+    # Binomial crossover
+    def Binomial(self, x, v, cr):
+        dim = len(x)
+        jrand = np.random.randint(dim)
+        u = np.where(np.random.random(dim) < cr, v, x)
+        u[jrand] = v[jrand]
+        return u
+
+    # Binomial crossover
+    def Binomial_(self, x, v, cr):
+        NP, dim = x.shape
+        jrand = np.random.randint(dim, size=NP)
+        u = np.where(np.random.rand(NP, dim) < cr.repeat(dim).reshape(NP, dim), v, x)
+        u[np.arange(NP), jrand] = v[np.arange(NP), jrand]
+        return u
+
+    # Exponential crossover
+    def Exponential(self, x, v, cr):
+        dim = len(x)
+        u = x.copy()
+        L = np.random.randint(dim)
+        for i in range(L, dim):
+            if np.random.random() < cr:
+                u[i] = v[i]
+            else:
+                break
+        return u
+
+    # Exponential crossover
+    def Exponential_(self, x, v, cr):
+        NP, dim = x.shape
+        u = x.copy()
+        L = np.random.randint(dim, size=NP).repeat(dim).reshape(NP, dim)
+        L = L <= np.arange(dim)
+        rvs = np.random.rand(NP, dim)
+        L = np.where(rvs > cr.repeat(dim).reshape(NP, dim), L, 0)
+        u = u * (1 - L) + v * L
+        return u
+
+    # update pa according to cost changes
+    def update_Pa(self, fa,fp,na,NP):
+        if na == 0 or fa == 0:
+            self.pa = 0.5
+            return
+        self.pa = (fa / (na + 1e-15)) / ((fa / (na + 1e-15)) + (fp / (NP-na + 1e-15)))
+        self.pa = np.minimum(0.9, np.maximum(self.pa, 0.1))
+
+    # step method for ensemble, optimize population for a few times
+    def step(self,
+             population,    # an initialized or half optimized population, the method will optimize it
+             problem,       # the problem instance
+             FEs,           # used number of evaluations, also the starting of current step
+             FEs_end,       # the ending evaluation number of step, step stop while reaching this limitation
+                            # i.e. user wants to run a step with 1000 evaluations period, it should be FEs + 1000
+             MaxFEs,         # the max number of evaluations
+             record_period=-1,
+             ):
+        if record_period <= 0:
+            record_period = FEs_end - FEs
+        # initialize population and archive
+        NP, dim = population.NP, population.dim
+        NA = int(NP * 2.1)
+        if NA < population.archive.shape[0]:
+            population.archive = population.archive[:NA]
+        self.pa = 0.5
+        k = 1
+        Fevs = []  # the function error value sequence required in CEC technical report
+        T1 = []
+        T2 = []
+        # check record point lest missing it
+        while FEs >= k * record_period:
+            k += 1
+        population.sort(population.NP)
+        tt = [0, 0, 0, 0, 0, 0, 0]
+        # start optimization loop
+        while FEs < FEs_end and FEs < MaxFEs:
+            t1 = time.time()
+            # select crossover rate and step length
+            Cr, F = population.choose_F_Cr()
+            Cr = np.sort(Cr)
+            # initialize some record values
+            fa = 0                                      # sum of cost improvement using archive
+            fp = 0                                      # sum of cost improvement without archive
+            ap = np.zeros(NP, bool)                     # record of whether a individual update with archive
+            df = np.array([])                           # record of cost improvement of each individual
+            pr = np.exp(-(np.arange(NP) + 1) / NP)      # calculate the rate of individuals at different positions being selected in others' mutation
+            pr /= np.sum(pr)
+            na = 0                                      # the number of archive usage
+            SF = np.array([])                           # the set records successful step length
+            SCr = np.array([])                          # the set records successful crossover rate
+            u = np.zeros((NP, dim))                     # trail vectors
+            # randomly select a crossover method for the population
+            CrossExponential = np.random.random() < 0.5
+            t2 = time.time()
+            pb_upper = int(np.maximum(2, NP * self.pb))  # the range of pbest selection
+            pbs = np.random.randint(pb_upper, size=NP)   # select pbest for all individual
+            count = 0
+            duplicate = np.where(pbs == np.arange(NP))[0]
+            while duplicate.shape[0] > 0 and count < 1:
+                pbs[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+                duplicate = np.where(pbs == np.arange(NP))[0]
+                count += 1
+            xpb = population.group[pbs]
+            t3 = time.time()
+            r1 = np.random.randint(NP, size=NP)
+            count = 0
+            duplicate = np.where((r1 == np.arange(NP)) + (r1 == pbs))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+                duplicate = np.where((r1 == np.arange(NP)) + (r1 == pbs))[0]
+                count += 1
+            x1 = population.group[r1]
+            t4 = time.time()
+            rvs = np.random.rand(NP)
+            r2_pop = np.where(rvs >= self.pa)[0]  # the indices of mutation with population
+            r2_arc = np.where(rvs < self.pa)[0]   # the indices of mutation with archive
+            use_arc = np.zeros(NP, dtype=bool)    # a record for archive usage, used in parameter updating
+            use_arc[r2_arc] = 1
+            if population.archive.shape[0] < 25:   # if the archive is empty, indices above are canceled
+                r2_pop = np.arange(NP)
+                r2_arc = np.array([], dtype=np.int32)
+            r2 = np.random.choice(np.arange(NP), size=r2_pop.shape[0], p=pr)
+            count = 0
+            duplicate = np.where((r2 == r2_pop) + (r2 == pbs[r2_pop]) + (r2 == r1[r2_pop]))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r2[duplicate] = np.random.choice(np.arange(NP), size=duplicate.shape[0], p=pr)
+                duplicate = np.where((r2 == r2_pop) + (r2 == pbs[r2_pop]) + (r2 == r1[r2_pop]))[0]
+                count += 1
+            x2 = np.zeros((NP, self.dim))
+            t5 = time.time()
+            # scatter indiv from population and archive into x2
+            if r2_pop.shape[0] > 0:
+                x2[r2_pop] = population.group[r2]
+            if r2_arc.shape[0] > 0:
+                x2[r2_arc] = population.archive[np.random.randint(np.minimum(population.archive.shape[0], NA), size=r2_arc.shape[0])]
+            Fs = F.repeat(self.dim).reshape(NP, self.dim)   # adjust shape for batch processing
+            vs = population.group + Fs * (xpb - population.group) + Fs * (x1 - x2)
+            # crossover rate for Binomial crossover has a different way for calculating
+            Crb = np.zeros(NP)
+            tmp_id = np.where(np.arange(NP) + FEs < 0.5 * MaxFEs)[0]
+            Crb[tmp_id] = 2 * ((FEs + tmp_id) / MaxFEs - 0.5)
+            if CrossExponential:
+                Cr = Crb
+                us = self.Binomial_(population.group, vs, Cr)
+            else:
+                us = self.Exponential_(population.group, vs, Cr)
+            # reinitialize values exceed valid range
+            us = us * ((-100 <= us) * (us <= 100)) + ((us > 100) + (us < -100)) * (np.random.rand(NP, dim) * 200 - 100)
+            t6 = time.time()
+            cost = self.evaluate(problem, us)
+            optim = np.where(cost < population.cost)[0]  # the indices of indiv whose costs are better than parent
+            for i in range(optim.shape[0]):
+                population.update_archive(i)
+            population.F[optim] = F[optim]
+            population.Cr[optim] = Cr[optim]
+            SF = F[optim]
+            SCr = Cr[optim]
+            df = (population.cost[optim] - cost[optim]) / (population.cost[optim] + 1e-9)
+            arc_usage = use_arc[optim]
+            fp = np.sum(df[arc_usage])
+            fa = np.sum(df[np.array(1 - arc_usage, dtype=bool)])
+            na = np.sum(arc_usage)
+            population.group[optim] = us[optim]
+            population.cost[optim] = cost[optim]
+            t7 = time.time()
+
+            if np.min(cost) < population.gbest:
+                population.gbest = np.min(cost)
+                population.gbest_solution = us[np.argmin(cost)]
+
+            FEs += NP
+            # adaptively adjust parameters
+            self.pb = 0.4 - 0.2 * (FEs / MaxFEs)
+            population.NLPSR(FEs, MaxFEs)
+            population.update_M_F_Cr(SF, SCr, df)
+            self.update_Pa(fa, fp, na, NP)
+            NP = population.NP
+            NA = population.NA
+            if FEs >= k * record_period:
+                Fevs.append(population.gbest)
+                k += 1
+            if np.min(cost) < 1e-8:
+                return population, Fevs, min(FEs, MaxFEs)
+
+        return population, Fevs, min(FEs, MaxFEs)
+
+    # a testing method which runs a complete optimization on a population and show its performance, similar to step
+    def test(self, population, problem, MaxFEs, period):
+        NP, dim = population.NP, population.dim
+        NA = int(NP * 2.1)
+        if NA < population.archive.shape[0]:
+            population.archive = population.archive[:NA]
+        k = 1
+        FEs = 0
+        Fevs = []
+        population.initialize_costs(problem)
+        factor = population.gbest
+        FEs += NP
+        population.sort(population.NP)
+        while FEs <= MaxFEs:
+            Cr,F = population.choose_F_Cr()
+            Cr = np.sort(Cr)
+            fa = 0
+            fp = 0
+            ap = np.zeros(NP, bool)
+            df = np.array([])
+            pr = np.exp(-(np.arange(NP) + 1) / NP)
+            pr /= np.sum(pr)
+            na = 0
+            SF = np.array([])
+            SCr = np.array([])
+            u = np.zeros((NP, dim))
+            CrossExponential = np.random.random() < 0.5
+
+            pb_upper = int(np.maximum(2, NP * self.pb))
+            pbs = np.random.randint(pb_upper, size=NP)
+            count = 0
+            duplicate = np.where(pbs == np.arange(NP))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                pbs[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+                duplicate = np.where(pbs == np.arange(NP))[0]
+                count += 1
+            xpb = population.group[pbs]
+
+            r1 = np.random.randint(NP, size=NP)
+            count = 0
+            duplicate = np.where((r1 == np.arange(NP)) + (r1 == pbs))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+                duplicate = np.where((r1 == np.arange(NP)) + (r1 == pbs))[0]
+                count += 1
+            x1 = population.group[r1]
+
+            rvs = np.random.rand(NP)
+            r2_pop = np.where(rvs >= self.pa)[0]
+            r2_arc = np.where(rvs < self.pa)[0]
+            use_arc = np.zeros(NP, dtype=bool)
+            use_arc[r2_arc] = 1
+            if population.archive.shape[0] < 1:
+                r2_pop = np.arange(NP)
+                r2_arc = np.array([], dtype=np.int32)
+            r2 = np.random.choice(np.arange(NP), size=r2_pop.shape[0], p=pr)
+            count = 0
+            duplicate = np.where((r2 == r2_pop) + (r2 == pbs[r2_pop]) + (r2 == r1[r2_pop]))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r2[duplicate] = np.random.choice(np.arange(NP), size=duplicate.shape[0], p=pr)
+                duplicate = np.where((r2 == r2_pop) + (r2 == pbs[r2_pop]) + (r2 == r1[r2_pop]))[0]
+                count += 1
+            x2 = np.zeros((NP, self.dim))
+            if r2_pop.shape[0] > 0:
+                x2[r2_pop] = population.group[r2]
+            if r2_arc.shape[0] > 0:
+                x2[r2_arc] = population.archive[
+                    np.random.randint(np.minimum(population.archive.shape[0], NA), size=r2_arc.shape[0])]
+            Fs = F.repeat(self.dim).reshape(NP, self.dim)
+            vs = population.group + Fs * (xpb - population.group) + Fs * (x1 - x2)
+            Crb = np.zeros(NP)
+            tmp_id = np.where(np.arange(NP) + FEs < 0.5 * MaxFEs)[0]
+            Crb[tmp_id] = 2 * ((FEs + tmp_id) / MaxFEs - 0.5)
+            if CrossExponential:
+                Cr = Crb
+                us = self.Binomial_(population.group, vs, Cr)
+            else:
+                us = self.Exponential_(population.group, vs, Cr)
+            us = us * ((-100 <= us) * (us <= 100)) + ((us > 100) + (us < -100)) * (np.random.rand(NP, dim) * 200 - 100)
+
+            cost = self.evaluate(problem, us)
+            optim = np.where(cost < population.cost)[0]
+            for i in range(optim.shape[0]):
+                population.update_archive(i)
+            population.F[optim] = F[optim]
+            population.Cr[optim] = Cr[optim]
+            SF = F[optim]
+            SCr = Cr[optim]
+            df = (population.cost[optim] - cost[optim]) / (population.cost[optim] + 1e-9)
+            arc_usage = use_arc[optim]
+            fp = np.sum(df[arc_usage])
+            fa = np.sum(df[np.array(1 - arc_usage, dtype=bool)])
+            na = np.sum(arc_usage)
+            population.group[optim] = us[optim]
+            population.cost[optim] = cost[optim]
+            if np.min(cost) < population.gbest:
+                population.gbest = np.min(cost)
+                population.gbest_solution = us[np.argmin(cost)]
+                if np.min(cost) < 1e-8:
+                    while len(Fevs) < MaxFEs // period:
+                        Fevs.append(1.0)
+                    return Fevs
+
+            FEs += NP
+            self.pb = 0.4 - 0.2 * (FEs / MaxFEs)
+            population.NLPSR(FEs, MaxFEs)
+            population.update_M_F_Cr(SF, SCr, df)
+            self.update_Pa(fa,fp,na,NP)
+            NP = population.NP
+            NA = population.NA
+
+            if FEs >= k * period:
+                Fevs.append(1 - population.gbest / factor)
+                k += 1
+        return Fevs
+
+    # an uniform interface for testing
+    def test_run(self,
+                 problem,   # the problem instance to be optimize
+                 MaxFEs,     # the max number of evaluations
+                 period,
+                 ):
+        # initialize optimizer
+        self.pa = 0.5
+        self.MF = np.ones(self.dim * 20) * 0.2
+        self.MCr = np.ones(self.dim * 20) * 0.2
+        self.pb = 0.4
+        self.pa = 0.5
+        self.archive = np.array([])
+        self.k = 0
+        population = Population(self.dim)
+        # record computation time and error values
+        start_time = time.time()
+        Fevs = self.test(population, problem, MaxFEs, period)
+        end_time = time.time()
+        return Fevs
+
+
+class JDE21:
+    def __init__(self, dim):
+        self.dim = dim      # problem dimension
+        self.sNP = 10       # size of small population
+        self.bNP = 160      # size of big population
+        # meaning of following parameters reference from the JDE21 paper
+        self.tao1 = 0.1
+        self.tao2 = 0.1
+        self.Finit = 0.5
+        self.CRinit = 0.9
+        self.Fl_b = 0.1
+        self.Fl_s = 0.17
+        self.Fu = 1.1
+        self.CRl_b = 0.0
+        self.CRl_s = 0.1
+        self.CRu_b = 1.1
+        self.CRu_s = 0.8
+        self.eps = 1e-12
+        self.MyEps = 0.25
+        # record number of operation called
+        self.nReset = 0
+        self.sReset = 0
+        self.cCopy = 0
+        self.terminateErrorValue = 1e-8
+
+    # check whether the optimization stuck(global best doesn't improve for a while)
+    def prevecEnakih(self, cost, best):
+        eqs = len(cost[np.fabs(cost - best) < self.eps])
+        return eqs > 2 and eqs > len(cost) * self.MyEps
+
+    # crowding operation describe in JDE21
+    def crowding(self, group, v):
+        dist = np.sum((group - v) ** 2, -1)
+        return np.argmin(dist)
+
+    def crowding_(self, group, vs):
+        NP, dim = vs.shape
+        dist = np.sum(((group * np.ones((NP, NP, dim))).transpose(1, 0, 2) - vs) ** 2, -1).transpose()
+        return np.argmin(dist, -1)
+
+    def evaluate(self, Xs, problem):
+        cost = problem.func(Xs) - problem.optimum
+        cost[cost < self.terminateErrorValue] = 0.0
+        return cost
+
+    def step(self,
+             population,    # an initialized or half optimized population, the method will optimize it
+             problem,       # the problem instance
+             FEs,           # used number of evaluations, also the starting of current step
+             FEs_end,       # the ending evaluation number of step, step stop while reaching this limitation
+             MaxFEs,         # the max number of evaluations
+             record_period=-1,
+             ):
+        if record_period <= 0:
+            record_period = FEs_end - FEs
+        # initialize population
+        NP = population.NP
+        dim = population.dim
+        sNP = self.sNP
+        bNP = NP - sNP
+        age = 0
+        k = 1
+        Fevs = []
+
+        def mutate_cross_select(r1, r2, r3, SF, SCr, df, age, big):
+            if big:
+                xNP = bNP
+                randF = np.random.rand(xNP) * self.Fu + self.Fl_b
+                randCr = np.random.rand(xNP) * self.CRu_b + self.CRl_b
+                pF = population.F[:xNP]
+                pCr = population.Cr[:xNP]
+            else:
+                xNP = sNP
+                randF = np.random.rand(xNP) * self.Fu + self.Fl_s
+                randCr = np.random.rand(xNP) * self.CRu_b + self.CRl_s
+                pF = population.F[bNP:]
+                pCr = population.Cr[bNP:]
+
+            rvs = np.random.rand(xNP)
+            F = np.where(rvs < self.tao1, randF, pF)
+            rvs = np.random.rand(xNP)
+            Cr = np.where(rvs < self.tao2, randCr, pCr)
+            Fs = F.repeat(dim).reshape(xNP, dim)
+            Crs = Cr.repeat(dim).reshape(xNP, dim)
+            v = population.group[r1] + Fs * (population.group[r2] - population.group[r3])
+            v = np.clip(v, population.Xmin, population.Xmax)
+            jrand = np.random.randint(dim, size=xNP)
+            u = np.where(np.random.rand(xNP, dim) < Crs, v, (population.group[:bNP] if big else population.group[bNP:]))
+            u[np.arange(xNP), jrand] = v[np.arange(xNP), jrand]
+            cost = self.evaluate(u, problem)
+            if big:
+                crowding_ids = self.crowding_(population.group[:xNP], u)
+            else:
+                crowding_ids = np.arange(xNP) + bNP
+            age += xNP
+            for i in range(xNP):
+                id = crowding_ids[i]
+                if cost[i] < population.cost[id]:
+                    # update and record
+                    population.update_archive(id)
+                    population.group[id] = u[i]
+                    population.cost[id] = cost[i]
+                    population.F[id] = F[i]
+                    population.Cr[id] = Cr[i]
+                    SF = np.append(SF, F[i])
+                    SCr = np.append(SCr, Cr[i])
+                    d = (population.cost[i] - cost[i]) / (population.cost[i] + 1e-9)
+                    df = np.append(df, d)
+                    if cost[i] < population.cbest:
+                        age = 0
+                        population.cbest_id = id
+                        population.cbest = cost[i]
+                        if cost[i] < population.gbest:
+                            population.gbest = cost[i]
+                            population.gbest_solution = u[i]
+
+            return SF, SCr, df, age
+
+        population.sort(NP, True)
+        # check record point lest missing it
+        while FEs >= k * record_period:
+            k += 1
+        while FEs < FEs_end:
+            # initialize temp records
+            v = np.zeros((NP, dim))
+            F = np.random.random(NP)
+            Cr = np.random.random(NP)
+            # small population evaluates same times as big one thus the total evaluations for a loop is doubled big one
+            N = bNP * 2
+            I = -1
+            df = np.array([])
+            SF = np.array([])
+            SCr = np.array([])
+            if self.prevecEnakih(population.cost[:bNP], population.gbest) or age > MaxFEs / 10:
+                self.nReset += 1
+                population.group[:bNP] = population.initialize_group(bNP)
+                population.F[:bNP] = self.Finit
+                population.Cr[:bNP] = self.CRinit
+                population.cost[:bNP] = 1e15
+                age = 0
+                population.cbest = np.min(population.cost)
+                population.cbest_id = np.argmin(population.cost)
+
+            if FEs < MaxFEs / 3:
+                mig = 1
+            elif FEs < 2 * MaxFEs / 3:
+                mig = 2
+            else:
+                mig = 3
+
+            r1 = np.random.randint(bNP, size=bNP)
+            count = 0
+            duplicate = np.where((r1 == np.arange(bNP)) * (r1 == population.cbest_id))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r1[duplicate] = np.random.randint(bNP, size=duplicate.shape[0])
+                duplicate = np.where((r1 == np.arange(bNP)) * (r1 == population.cbest_id))[0]
+                count += 1
+
+            r2 = np.random.randint(bNP + mig, size=bNP)
+            count = 0
+            duplicate = np.where((r2 == np.arange(bNP)) + (r2 == r1))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r2[duplicate] = np.random.randint(bNP + mig, size=duplicate.shape[0])
+                duplicate = np.where((r2 == np.arange(bNP)) + (r2 == r1))[0]
+                count += 1
+
+            r3 = np.random.randint(bNP + mig, size=bNP)
+            count = 0
+            duplicate = np.where((r3 == np.arange(bNP)) + (r3 == r1) + (r3 == r2))[0]
+            while duplicate.shape[0] > 0 and count < 25:
+                r3[duplicate] = np.random.randint(bNP + mig, size=duplicate.shape[0])
+                duplicate = np.where((r3 == np.arange(bNP)) + (r3 == r1) + (r3 == r2))[0]
+                count += 1
+
+            SF, SCr, df, age = mutate_cross_select(r1, r2, r3, SF, SCr, df, age, big=True)
+            FEs += bNP
+
+            if FEs >= k * record_period:
+                Fevs.append(population.gbest)
+                k += 1
+            if np.min(population.cost) < self.terminateErrorValue:
+                return population, Fevs, min(FEs, MaxFEs)
+            if FEs >= FEs_end:
+                return population, Fevs, min(FEs, MaxFEs)
+
+            if population.cbest_id >= bNP and self.prevecEnakih(population.cost[bNP:], population.cbest):
+                self.sReset += 1
+                cbest = population.cbest
+                cbest_id = population.cbest_id
+                tmp = population.group[cbest_id]
+                population.group[bNP:] = population.initialize_group(sNP)
+                population.F[bNP:] = self.Finit
+                population.Cr[bNP:] = self.CRinit
+                population.cost[bNP:] = 1e15
+                population.cbest = cbest
+                population.cbest_id = cbest_id
+                population.group[cbest_id] = tmp
+                population.cost[cbest_id] = cbest
+
+            if population.cbest_id < bNP:
+                self.cCopy += 1
+                population.cost[bNP] = population.cbest
+                population.group[bNP] = population.group[population.cbest_id]
+                population.cbest_id = bNP
+
+            for i in range(bNP // sNP):
+
+                r1 = np.random.randint(sNP, size=sNP) + bNP
+                count = 0
+                duplicate = np.where(r1 == (np.arange(sNP) + bNP))[0]
+                while duplicate.shape[0] > 0 and count < 25:
+                    r1[duplicate] = np.random.randint(sNP, size=duplicate.shape[0]) + bNP
+                    duplicate = np.where(r1 == (np.arange(sNP) + bNP))[0]
+                    count += 1
+
+                r2 = np.random.randint(sNP, size=sNP) + bNP
+                count = 0
+                duplicate = np.where((r2 == (np.arange(sNP) + bNP)) + (r2 == r1))[0]
+                while duplicate.shape[0] > 0 and count < 25:
+                    r2[duplicate] = np.random.randint(sNP, size=duplicate.shape[0]) + bNP
+                    duplicate = np.where((r2 == (np.arange(sNP) + bNP)) + (r2 == r1))[0]
+                    count += 1
+
+                r3 = np.random.randint(sNP, size=sNP) + bNP
+                count = 0
+                duplicate = np.where((r3 == (np.arange(sNP) + bNP)) + (r3 == r1) + (r3 == r2))[0]
+                while duplicate.shape[0] > 0 and count < 25:
+                    r3[duplicate] = np.random.randint(sNP, size=duplicate.shape[0]) + bNP
+                    duplicate = np.where((r3 == (np.arange(sNP) + bNP)) + (r3 == r1) + (r3 == r2))[0]
+                    count += 1
+
+                SF, SCr, df, age = mutate_cross_select(r1, r2, r3, SF, SCr, df, age, big=False)
+                FEs += sNP
+
+                if FEs >= k * record_period:
+                    Fevs.append(population.gbest)
+                    k += 1
+                if np.min(population.cost) < self.terminateErrorValue:
+                    return population, Fevs, min(FEs, MaxFEs)
+                if FEs >= FEs_end:
+                    return population, Fevs, min(FEs, MaxFEs)
+
+            # update and record information for NL-SHADE-RSP and reduce population
+
+            population.update_M_F_Cr(SF, SCr, df)
+            NP = int(population.cal_NP_next_gen(FEs, MaxFEs))
+            population.NP = NP
+            # population.sort(NP, True)
+            population.group = population.group[-NP:]
+            population.cost = population.cost[-NP:]
+            population.F = population.F[-NP:]
+            population.Cr = population.Cr[-NP:]
+            population.cbest_id = np.argmin(population.cost)
+            population.cbest = np.min(population.cost)
+            bNP = NP - sNP
+
+        return population, Fevs, min(FEs, MaxFEs)
+
+    # a testing method which runs a complete optimization on a population and show its performance, similar to step
+    def test(self, population, problem, MaxFEs, period):
+        NP = population.NP
+        dim = population.dim
+        sNP = self.sNP
+        bNP = NP - sNP
+        age = 0
+        k = 1
+        FEs = 0
+        Fevs = []
+        population.cost = problem.func(population.group)
+        population.cbest = np.min(population.cost)
+        population.cbest_id = np.argmin(population.cost)
+        population.gbest = population.cbest
+        population.gbest_solution = population.group[population.cbest_id]
+        factor = population.gbest
+        FEs += NP
+        while FEs < MaxFEs:
+            v = np.zeros((NP, dim))
+            F = np.random.random(NP)
+            Cr = np.random.random(NP)
+            N = bNP * 2
+            I = -1
+            while I < N:
+                I += 1
+                if I == 0 and (self.prevecEnakih(population.cost[:bNP], population.cbest) or age > MaxFEs / 10):
+                    self.nReset += 1
+                    population.group[:bNP] = population.initialize_group(bNP)
+                    population.F[:bNP] = self.Finit
+                    population.Cr[:bNP] = self.CRinit
+                    population.cost[:bNP] = 1e15
+                    age = 0
+                    population.cbest = np.min(population.cost)
+                    population.cbest_id = np.argmin(population.cost)
+
+                if I == bNP and population.cbest_id >= bNP and self.prevecEnakih(population.cost[bNP:], population.cbest):
+                    self.sReset += 1
+                    cbest = population.cbest
+                    cbest_id = population.cbest_id
+                    tmp = population.group[cbest_id]
+                    population.group[bNP:] = population.initialize_group(sNP)
+                    population.F[bNP:] = self.Finit
+                    population.Cr[bNP:] = self.CRinit
+                    population.cost[bNP:] = 1e15
+                    population.cbest = cbest
+                    population.cbest_id = cbest_id
+                    population.group[cbest_id] = tmp
+
+                if I == bNP and population.cbest_id < bNP:
+                    self.cCopy += 1
+                    population.cost[bNP] = population.cbest
+                    population.group[bNP] = population.group[population.cbest_id]
+                    population.cbest_id = bNP
+
+                i = I
+                if I > bNP:
+                    i = bNP + (i - bNP) % sNP
+                if i < bNP:
+                    F[i] = np.random.random() * self.Fu + self.Fl_b if np.random.random() < self.tao1 else population.F[i]
+                    Cr[i] = np.random.random() * self.CRu_b + self.CRl_b if np.random.random() < self.tao2 else population.Cr[i]
+                    if FEs < MaxFEs / 3:
+                        mig = 1
+                    elif FEs < 2 * MaxFEs / 3:
+                        mig = 2
+                    else:
+                        mig = 3
+                    r1 = np.random.randint(bNP)
+                    while r1 == i and r1 == population.cbest_id:
+                        r1 = np.random.randint(bNP)
+                    r2 = np.random.randint(bNP + mig)
+                    while r2 == i or r2 == r1:
+                        r2 = np.random.randint(bNP + mig)
+                    r3 = np.random.randint(bNP + mig)
+                    while r3 == i or r3 == r1 or r3 == r2:
+                        r3 = np.random.randint(bNP + mig)
+                else:
+                    F[i] = np.random.random() * self.Fu + self.Fl_s if np.random.random() < self.tao1 else population.F[i]
+                    Cr[i] = np.random.random() * self.CRu_s + self.CRl_s if np.random.random() < self.tao2 else population.Cr[i]
+                    r1 = np.random.randint(sNP) + bNP
+                    while r1 == i:
+                        r1 = np.random.randint(sNP) + bNP
+                    r2 = np.random.randint(sNP) + bNP
+                    while r2 == i or r2 == r1:
+                        r2 = np.random.randint(sNP) + bNP
+                    r3 = np.random.randint(sNP) + bNP
+                    while r3 == i or r3 == r2 or r3 == r1:
+                        r3 = np.random.randint(sNP) + bNP
+                v[i] = population.group[r1] + F[i] * (population.group[r2] - population.group[r3])
+                v[i][v[i] < population.Xmin] = population.Xmin[v[i] < population.Xmin]
+                v[i][v[i] > population.Xmax] = population.Xmax[v[i] > population.Xmax]
+                if Cr[i] <= 1:
+                    jrand = np.random.randint(dim)
+                    for j in range(dim):
+                        if np.random.random() >= Cr[i] and j != jrand:
+                            v[i][j] = population.group[i][j]
+                cost = self.evaluate(v[None, i], problem)[0]
+                id = i
+                if i < bNP:
+                    id = self.crowding(population.group[:bNP], v[i])
+                    age += 1
+                if cost < population.cbest:
+                    age = 0
+                    if cost < population.gbest:
+                        population.gbest = cost
+                        population.gbest_solution = v[i]
+                        if cost < self.terminateErrorValue:
+                            while len(Fevs) < MaxFEs // period:
+                                Fevs.append(1.0)
+                            return Fevs
+                    population.group[id] = v[i]
+                    population.cost[id] = cost
+                    population.F[id] = F[i]
+                    population.Cr[id] = Cr[i]
+                    population.cbest_id = id
+                    population.cbest = cost
+                elif cost < population.cost[id]:
+                    population.group[id] = v[i]
+                    population.cost[id] = cost
+                    population.F[id] = F[i]
+                    population.Cr[id] = Cr[i]
+                reduction = MaxFEs / 4
+                if FEs == int(reduction) or FEs == int(reduction * 2) or FEs == int(reduction * 3):
+                    population.sort(bNP)
+                    population.reduction(bNP)
+                    bNP = bNP // 2
+                    NP = bNP + sNP
+                    N = bNP * 2
+
+                FEs += 1
+                if FEs >= k * period:
+                    Fevs.append(1 - population.gbest / factor)
+                    k += 1
+                if FEs >= MaxFEs:
+                    return Fevs
+
+        return Fevs
+
+    # an uniform interface for testing
+    def test_run(self,
+                 problem,  # the problem instance to be optimize
+                 MaxFEs,  # the max number of evaluations
+                 period,
+                 ):
+        self.sNP = 10
+        self.bNP = 160
+        population = Population(self.dim)
+        start_time = time.time()
+        Fevs = self.test(population, problem, MaxFEs, period)
+        end_time = time.time()
+        return Fevs
+
+
+class APGSK:
+    def __init__(self, dim):
+        self.dim = dim
+        self.p = 0.1
+        self.c = 0.05
+        self.krPool = np.array([0.2, 0.1, 0.9, 0.9])
+        self.kfPool1 = np.array([0.1, 1.0, 0.5, 1.0])
+        self.kfPool2 = np.array([-0.1, -0.1, -0.1, -0.1])
+        self.kwp = np.array([0.85, 0.05, 0.05, 0.05])
+
+    def junior(self, population, cost, kf):
+        NP, dim = population.shape
+        x = np.zeros((NP, dim))
+        arange = np.arange(NP)
+        r1 = np.concatenate((arange[-1:], arange[:-1]), 0)
+        r2 = np.concatenate((arange[1:], arange[:1]), 0)
+        r1[0] = 1
+        r2[0] = 2
+        r1[-1] = NP - 3
+        r2[-1] = NP - 2
+
+        count = 0
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+            count += 1
+
+        x1 = population[r1]
+        x2 = population[r2]
+        xr = population[r3]
+        cr = cost[r3]
+
+        kfs = kf.repeat(dim).reshape(NP, dim)
+        x[cost > cr] = (x + kfs * ((x1 - x2) + (xr - x)))[cost > cr]
+        x[cost <= cr] = (x + kfs * ((x1 - x2) + (x - xr)))[cost <= cr]
+        return x
+
+    def senior(self, population, cost, kf):
+        NP, dim = population.shape
+        x = np.zeros((NP, dim))
+        pb = max(int(NP * self.p), 1)
+        xb = population[np.random.randint(pb, size=NP)]
+        m = np.random.randint(NP - pb * 2, size=NP) + pb
+        xm = population[m]
+        cm = cost[m]
+        xw = population[np.random.randint(pb, size=NP) + NP - pb]
+        kfs = kf.repeat(dim).reshape(NP, dim)
+        x[cost > cm] = (x + kfs * ((xb - xw) + (xm - x)))[cost > cm]
+        x[cost <= cm] = (x + kfs * ((xb - xw) + (x - xm)))[cost <= cm]
+        return x
+
+    def step(self, population, problem, FEs, FEs_end, MaxFEs, record_period=-1):
+        if record_period <= 0:
+            record_period = FEs_end - FEs
+
+        Fevs = []
+        k = 0
+        while FEs >= k * record_period:
+            k += 1
+        population.sort(population.NP)
+        while FEs < FEs_end:
+            NP, dim = population.NP, population.dim
+            dj = (MaxFEs - FEs) / MaxFEs
+            dj = np.ceil(dim * np.power(dj, 0.5 if np.random.rand() > FEs / MaxFEs else 2))
+            kw = np.random.choice(4, size=NP, p=self.kwp)
+            kr = self.krPool[kw]
+            if np.random.rand() >= 0.3 and FEs > 0.5 * MaxFEs:
+                kf = self.kfPool1[kw]
+            else:
+                kf = self.kfPool2[kw]
+            xj = self.junior(population.group, population.cost, kf)
+            xs = self.senior(population.group, population.cost, kf)
+            xj[xj < -100] = (population.group[xj < -100] - 100) / 2
+            xs[xs < -100] = (population.group[xs < -100] - 100) / 2
+            xj[xj > 100] = (population.group[xj > 100] + 100) / 2
+            xs[xs > 100] = (population.group[xs > 100] + 100) / 2
+            x = copy.deepcopy(population.group)
+            Jmask = np.random.rand(NP, dim) <= (dj / dim)
+            Smask = 1 - Jmask
+            rand_Jmask = np.random.rand(NP, dim) <= kr.repeat(dim).reshape(NP, dim)
+            Jmask = rand_Jmask * Jmask
+            rand_Smask = np.random.rand(NP, dim) <= kr.repeat(dim).reshape(NP, dim)
+            Smask = rand_Smask * Smask
+            x[Jmask] = xj[Jmask]
+            x[Smask] = xs[Smask]
+            ncost = problem.func(x)
+            FEs += NP
+            if FEs > 0.1 * MaxFEs:
+                df = np.maximum(0, population.cost - ncost)
+                if np.sum(df) > 0:
+                    w = np.zeros(4)
+                    for i in range(NP):
+                        w[kw[i]] += df[i]
+                    w /= np.sum(w)
+                    maxw = np.argmax(w)
+                    dps = np.maximum(0.05, w)
+                    dps[maxw] = 1 - np.sum(dps) + dps[maxw]
+                else:
+                    dps = np.ones(4) / 4
+                self.kwp = (1 - self.c) * self.kwp + self.c * dps
+                self.kwp /= np.sum(self.kwp)
+            population.group[ncost < population.cost] = x[ncost < population.cost]
+            population.cost = np.minimum(population.cost, ncost)
+            if np.min(population.cost) < population.gbest:
+                population.gbest = np.min(population.cost)
+                population.gbest_solution = population.group[np.argmin(population.cost)]
+                if np.min(population.cost) < 1e-8:
+                    return population, Fevs, min(FEs, MaxFEs)
+            population.NLPSR(FEs, MaxFEs)
+            if FEs >= k * record_period and FEs <= FEs_end:
+                Fevs.append(population.gbest)
+                k += 1
+        return population, Fevs, FEs_end
+
+
+class IMODE:
+    def __init__(self, dim):
+        self.dim = dim
+        self.gbest_x_op = np.zeros((3, dim))
+        self.gbest_cost_op = np.ones(3) * 1e15
+        self.op_rate = np.ones(3) / 3
+
+    def ctb_wo_arc(self, group, best, Fs):
+        NP, dim = group.shape
+        NB = best.shape[0]
+
+        count = 0
+        rb = np.random.randint(NB, size=NP)
+        duplicate = np.where(rb == np.arange(NP))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            rb[duplicate] = np.random.randint(NB, size=duplicate.shape[0])
+            duplicate = np.where(rb == np.arange(NP))[0]
+            count += 1
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        xb = best[rb]
+        x1 = group[r1]
+        x2 = group[r2]
+        v = group + Fs * (xb - group) + Fs * (x1 - x2)
+
+        return v
+
+    def ctb_w_arc(self, group, best, archive, Fs):
+        NP, dim = group.shape
+        NB = best.shape[0]
+        NA = archive.shape[0]
+
+        count = 0
+        rb = np.random.randint(NB, size=NP)
+        duplicate = np.where(rb == np.arange(NP))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            rb[duplicate] = np.random.randint(NB, size=duplicate.shape[0])
+            duplicate = np.where(rb == np.arange(NP))[0]
+            count += 1
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP + NA, size=NP)
+        duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP + NA, size=duplicate.shape[0])
+            duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        xb = best[rb]
+        x1 = group[r1]
+        if NA > 0:
+            x2 = np.concatenate((group, archive), 0)[r2]
+        else:
+            x2 = group[r2]
+        v = group + Fs * (xb - group) + Fs * (x1 - x2)
+
+        return v
+
+    def weighted_rtb(self, group, best, Fs):
+        NP, dim = group.shape
+        NB = best.shape[0]
+
+        count = 0
+        rb = np.random.randint(NB, size=NP)
+        duplicate = np.where(rb == np.arange(NP))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            rb[duplicate] = np.random.randint(NB, size=duplicate.shape[0])
+            duplicate = np.where(rb == np.arange(NP))[0]
+            count += 1
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        xb = best[rb]
+        x1 = group[r1]
+        x2 = group[r2]
+        v = Fs * x1 + Fs * (xb - x2)
+
+        return v
+
+    def binomial(self, x, v, Crs):
+        NP, dim = x.shape
+        jrand = np.random.randint(dim, size=NP)
+        u = np.where(np.random.rand(NP, dim) < Crs, v, x)
+        u[np.arange(NP), jrand] = v[np.arange(NP), jrand]
+        return u
+
+    def exponential(self, x, v, Crs):
+        NP, dim = x.shape
+        u = x.copy()
+        L = np.random.randint(dim, size=NP).repeat(dim).reshape(NP, dim)
+        L = L <= np.arange(dim)
+        rvs = np.random.rand(NP, dim)
+        L = np.where(rvs > Crs, L, 0)
+        u = u * (1 - L) + v * L
+        return u
+
+    def step(self, population, problem, FEs, FEs_end, MaxFEs, record_period=-1):
+        if record_period <= 0:
+            record_period = FEs_end - FEs
+
+        Fevs = []
+        k = 0
+        while FEs >= k * record_period:
+            k += 1
+        population.sort(population.NP)
+        if self.gbest_cost_op[0] >= 1e15:
+            self.gbest_x_op[:] = population.gbest_solution
+            self.gbest_cost_op[:] = population.gbest
+        while FEs < FEs_end:
+            NP, dim = population.NP, population.dim
+            # according to performance of 3 ops, randomly assign indiv
+            op_indiv_index = np.random.choice(3, size=NP, p=self.op_rate)
+
+            PB12 = max(int(0.25 * population.NP), 2)
+            PB3 = max(int(0.5 * population.NP), 1)
+            best_op12 = population.group[:PB12]
+            best_op3 = population.group[:PB3]
+            group_op1 = population.group[op_indiv_index == 0]
+            group_op2 = population.group[op_indiv_index == 1]
+            group_op3 = population.group[op_indiv_index == 2]
+            Cr, F = population.choose_F_Cr()
+            Fs = F.repeat(dim).reshape(NP, dim)
+            v1 = self.ctb_wo_arc(group_op1, best_op12, Fs[op_indiv_index == 0])
+            v2 = self.ctb_w_arc(group_op2, best_op12, population.archive, Fs[op_indiv_index == 1])
+            v3 = self.weighted_rtb(group_op3, best_op3, Fs[op_indiv_index == 2])
+            v = np.zeros((NP, dim))
+            v[op_indiv_index == 0] = v1
+            v[op_indiv_index == 1] = v2
+            v[op_indiv_index == 2] = v3
+            rnd = np.random.rand(NP)
+            Crs = Cr.repeat(dim).reshape(NP, dim)
+            u = np.zeros((NP, dim))
+            be_rate = 0.3
+            u[rnd < be_rate] = self.exponential(population.group[rnd < be_rate], v[rnd < be_rate], Crs[rnd < be_rate])
+            u[rnd >= be_rate] = self.binomial(population.group[rnd >= be_rate], v[rnd >= be_rate], Crs[rnd >= be_rate])
+            u = np.clip(u, -100, 100)
+            ncost = problem.func(u)
+            FEs += NP
+            SF = F[ncost < population.cost]
+            SCr = Cr[ncost < population.cost]
+            df = (population.cost - ncost)[ncost < population.cost]
+            population.update_M_F_Cr(SF, SCr, df)
+            optim = np.where(ncost < population.cost)[0]
+            for i in optim:
+                population.update_archive(i)
+            df = np.maximum(0, population.cost - ncost) / np.fabs(population.cost)
+            count_S = np.zeros(3)
+            for i in range(3):
+                count_S[i] = np.mean(df[op_indiv_index == i])
+            if np.sum(count_S) > 0:
+                self.op_rate = np.maximum(0.1, np.minimum(0.9, count_S / np.sum(count_S)))
+                self.op_rate /= np.sum(self.op_rate)
+            else:
+                self.op_rate = np.ones(3) / 3
+            population.group[optim] = u[optim]
+            population.cost = np.minimum(population.cost, ncost)
+            population.NLPSR(FEs, MaxFEs)
+            if np.min(population.cost) < population.gbest:
+                population.gbest = np.min(population.cost)
+                population.gbest_solution = population.group[np.argmin(population.cost)]
+                if np.min(population.cost) < 1e-8:
+                    return population, Fevs, min(FEs, MaxFEs)
+            if FEs >= k * record_period and FEs <= FEs_end:
+                Fevs.append(population.gbest)
+                k += 1
+        return population, Fevs, FEs_end
+
+
+class MadDE:
+    def __init__(self, dim):
+        self.dim = dim
+        self.p = 0.18
+        self.PqBX = 0.01
+        self.F0 = 0.2
+        self.Cr0 = 0.2
+        self.pm = np.ones(3) / 3
+
+    def ctb_w_arc(self, group, best, archive, Fs):
+        NP, dim = group.shape
+        NB = best.shape[0]
+        NA = archive.shape[0]
+
+        count = 0
+        rb = np.random.randint(NB, size=NP)
+        duplicate = np.where(rb == np.arange(NP))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            rb[duplicate] = np.random.randint(NB, size=duplicate.shape[0])
+            duplicate = np.where(rb == np.arange(NP))[0]
+            count += 1
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP + NA, size=NP)
+        duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP + NA, size=duplicate.shape[0])
+            duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        xb = best[rb]
+        x1 = group[r1]
+        if NA > 0:
+            x2 = np.concatenate((group, archive), 0)[r2]
+        else:
+            x2 = group[r2]
+        v = group + Fs * (xb - group) + Fs * (x1 - x2)
+
+        return v
+
+    def ctr_w_arc(self, group, archive, Fs):
+        NP, dim = group.shape
+        NA = archive.shape[0]
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP + NA, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP + NA, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        x1 = group[r1]
+        if NA > 0:
+            x2 = np.concatenate((group, archive), 0)[r2]
+        else:
+            x2 = group[r2]
+        v = group + Fs * (x1 - x2)
+
+        return v
+
+    def weighted_rtb(self, group, best, Fs, Fas):
+        NP, dim = group.shape
+        NB = best.shape[0]
+
+        count = 0
+        rb = np.random.randint(NB, size=NP)
+        duplicate = np.where(rb == np.arange(NP))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            rb[duplicate] = np.random.randint(NB, size=duplicate.shape[0])
+            duplicate = np.where(rb == np.arange(NP))[0]
+            count += 1
+
+        count = 0
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r1 == rb) + (r1 == np.arange(NP)))[0]
+            count += 1
+
+        count = 0
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0 and count < 25:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == rb) + (r2 == np.arange(NP)) + (r2 == r1))[0]
+            count += 1
+
+        xb = best[rb]
+        x1 = group[r1]
+        x2 = group[r2]
+        v = Fs * x1 + Fs * Fas * (xb - x2)
+
+        return v
+
+    def binomial(self, x, v, Crs):
+        NP, dim = x.shape
+        jrand = np.random.randint(dim, size=NP)
+        u = np.where(np.random.rand(NP, dim) < Crs, v, x)
+        u[np.arange(NP), jrand] = v[np.arange(NP), jrand]
+        return u
+
+    def step(self, population, problem, FEs, FEs_end, MaxFEs, record_period=-1):
+        if record_period <= 0:
+            record_period = FEs_end - FEs
+
+        Fevs = []
+        k = 1
+        while FEs >= k * record_period:
+            k += 1
+        population.sort(population.NP)
+        while FEs < FEs_end and FEs < MaxFEs:
+            NP, dim = population.NP, population.dim
+            q = 2 * self.p - self.p * FEs / MaxFEs
+            Fa = 0.5 + 0.5 * FEs / MaxFEs
+            Cr, F = population.choose_F_Cr()
+            mu = np.random.choice(3, size=NP, p=self.pm)
+            p1 = population.group[mu == 0]
+            p2 = population.group[mu == 1]
+            p3 = population.group[mu == 2]
+            pbest = population.group[:max(int(self.p * NP), 2)]
+            qbest = population.group[:max(int(q * NP), 2)]
+            Fs = F.repeat(dim).reshape(NP, dim)
+            v1 = self.ctb_w_arc(p1, pbest, population.archive, Fs[mu == 0])
+            v2 = self.ctr_w_arc(p2, population.archive, Fs[mu == 1])
+            v3 = self.weighted_rtb(p3, qbest, Fs[mu == 2], Fa)
+            v = np.zeros((NP, dim))
+            v[mu == 0] = v1
+            v[mu == 1] = v2
+            v[mu == 2] = v3
+            v[v < -100] = (population.group[v < -100] - 100) / 2
+            v[v > 100] = (population.group[v > 100] + 100) / 2
+            rvs = np.random.rand(NP)
+            Crs = Cr.repeat(dim).reshape(NP, dim)
+            u = np.zeros((NP, dim))
+            if np.sum(rvs <= self.PqBX) > 0:
+                qu = v[rvs <= self.PqBX]
+                if population.archive.shape[0] > 0:
+                    qbest = np.concatenate((population.group, population.archive), 0)[:max(int(q * (NP + population.archive.shape[0])), 2)]
+                cross_qbest = qbest[np.random.randint(qbest.shape[0], size=qu.shape[0])]
+                qu = self.binomial(cross_qbest, qu, Crs[rvs <= self.PqBX])
+                u[rvs <= self.PqBX] = qu
+            bu = v[rvs > self.PqBX]
+            bu = self.binomial(population.group[rvs > self.PqBX], bu, Crs[rvs > self.PqBX])
+            u[rvs > self.PqBX] = bu
+            ncost = problem.func(u)
+            FEs += NP
+            optim = np.where(ncost < population.cost)[0]
+            for i in optim:
+                population.update_archive(i)
+            SF = F[optim]
+            SCr = Cr[optim]
+            df = np.maximum(0, population.cost - ncost)
+            population.update_M_F_Cr(SF, SCr, df[optim])
+            count_S = np.zeros(3)
+            for i in range(3):
+                count_S[i] = np.mean(df[mu == i] / population.cost[mu == i])
+            if np.sum(count_S) > 0:
+                self.pm = np.maximum(0.1, np.minimum(0.9, count_S / np.sum(count_S)))
+                self.pm /= np.sum(self.pm)
+            else:
+                self.pm = np.ones(3) / 3
+
+            population.group[optim] = u[optim]
+            population.cost = np.minimum(population.cost, ncost)
+            population.NLPSR(FEs, MaxFEs)
+            if np.min(population.cost) < population.gbest:
+                population.gbest = np.min(population.cost)
+                population.gbest_solution = population.group[np.argmin(population.cost)]
+
+            if FEs >= k * record_period:
+                Fevs.append(population.gbest)
+                k += 1
+            if np.min(population.cost) < 1e-8:
+                return population, Fevs, min(FEs, MaxFEs)
+        return population, Fevs, min(FEs, MaxFEs)
+
+
+class basic_DE:
+    def __init__(self, dim):
+        self.dim = dim
+        self.terminateErrorValue = 1e-8
+
+    def evaluate(self, Xs, problem):
+        cost = problem.func(Xs) - problem.optimum
+        cost[cost < self.terminateErrorValue] = 0.0
+        return cost
+
+    def best1(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        trail = population.gbest_solution + Fs * (x1 - x2)
+
+        return trail
+
+    def best2(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+
+        r4 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+        while duplicate.shape[0] > 0:
+            r4[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        x3 = population.group[r3]
+        x4 = population.group[r4]
+        trail = population.gbest_solution + Fs * (x1 - x2) + Fs * (x3 - x4)
+
+        return trail
+
+    def rand2(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+
+        r4 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+        while duplicate.shape[0] > 0:
+            r4[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+
+        r5 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r5 == np.arange(NP)) + (r5 == r1) + (r5 == r2) + (r5 == r3) + (r5 == r4))[0]
+        while duplicate.shape[0] > 0:
+            r5[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r5 == np.arange(NP)) + (r5 == r1) + (r5 == r2) + (r5 == r3) + (r5 == r4))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        x3 = population.group[r3]
+        x4 = population.group[r4]
+        x5 = population.group[r5]
+        trail = x5 + Fs * (x1 - x2) + Fs * (x3 - x4)
+
+        return trail
+
+    def rand1(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        x3 = population.group[r3]
+        trail = x1 + Fs * (x2 - x3)
+
+        return trail
+
+    def current2rand(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        x3 = population.group[r3]
+        trail = population.group + Fs * (x1 - population.group) + Fs * (x2 - x3)
+
+        return trail
+
+    def current2best(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        trail = population.group + Fs * (population.gbest_solution - population.group) + Fs * (x1 - x2)
+
+        return trail
+
+    def rand2best2(self, population, Fs):
+        NP = population.NP
+
+        r1 = np.random.randint(NP, size=NP)
+        duplicate = np.where(r1 == np.arange(NP))[0]
+        while duplicate.shape[0] > 0:
+            r1[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where(r1 == np.arange(NP))[0]
+
+        r2 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+        while duplicate.shape[0] > 0:
+            r2[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r2 == np.arange(NP)) + (r2 == r1))[0]
+
+        r3 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+        while duplicate.shape[0] > 0:
+            r3[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r3 == np.arange(NP)) + (r3 == r1) + (r3 == r2))[0]
+
+        r4 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+        while duplicate.shape[0] > 0:
+            r4[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r4 == np.arange(NP)) + (r4 == r1) + (r4 == r2) + (r4 == r3))[0]
+
+        r5 = np.random.randint(NP, size=NP)
+        duplicate = np.where((r5 == np.arange(NP)) + (r5 == r1) + (r5 == r2) + (r5 == r3) + (r5 == r4))[0]
+        while duplicate.shape[0] > 0:
+            r5[duplicate] = np.random.randint(NP, size=duplicate.shape[0])
+            duplicate = np.where((r5 == np.arange(NP)) + (r5 == r1) + (r5 == r2) + (r5 == r3) + (r5 == r4))[0]
+
+        x1 = population.group[r1]
+        x2 = population.group[r2]
+        x3 = population.group[r3]
+        x4 = population.group[r4]
+        x5 = population.group[r5]
+        trail = x5 + Fs * (population.gbest_solution - population.group) + Fs * (x1 - x2) + Fs * (x3 - x4)
+
+        return trail
+
+    def mutation(self, population, Fs):
+        pass
+
+    def binomial(self, population, trail, Crs):
+        NP, dim = population.NP, population.dim
+        jrand = np.random.randint(dim, size=NP)
+        u = np.where(np.random.rand(NP, dim) < Crs, trail, population.group)
+        u[np.arange(NP), jrand] = trail[np.arange(NP), jrand]
+        return u
+
+    def exponential(self, population, trail, Crs):
+        NP, dim = population.NP, population.dim
+        u = population.group.copy()
+        L = np.random.randint(dim, size=NP).repeat(dim).reshape(NP, dim)
+        L = L <= np.arange(dim)
+        rvs = np.random.rand(NP, dim)
+        L = np.where(rvs > Crs, L, 0)
+        u = u * (1 - L) + trail * L
+        return u
+
+    def crossover(self, population, trail, Crs):
+        pass
+
+    def step(self,
+             population,    # an initialized or half optimized population, the method will optimize it
+             problem,       # the problem instance
+             FEs,           # used number of evaluations, also the starting of current step
+             FEs_end,       # the ending evaluation number of step, step stop while reaching this limitation
+             MaxFEs,         # the max number of evaluations
+             record_period=-1,
+             ):
+        if record_period < 0:
+            record_period = FEs_end - FEs
+        # initialize population
+        NP = population.NP
+        k = 1
+        Fevs = []
+        # check record point lest missing it
+        while FEs >= k * record_period:
+            k += 1
+        while FEs < FEs_end and FEs < MaxFEs:
+            F = np.random.rand(NP)
+            Fs = F.repeat(self.dim).reshape(NP, self.dim)
+            Cr = 0.5 * (1 + np.random.rand(NP))
+            Crs = Cr.repeat(self.dim).reshape(NP, self.dim)
+            trail = self.mutation(population, Fs)
+            trail = self.crossover(population, trail, Crs)
+
+            if FEs + NP >= FEs_end:
+                trail = trail[:FEs_end - FEs]
+            costs = self.evaluate(trail, problem)
+            replace_id = np.where(costs < population.cost[:trail.shape[0]])[0]
+
+            SF = F[replace_id]
+            SCr = Cr[replace_id]
+            df = (population.cost[replace_id] - costs[replace_id]) / (population.cost[replace_id] + 1e-9)
+            population.group[replace_id] = trail[replace_id]
+            population.cost[replace_id] = costs[replace_id]
+            FEs += NP
+
+            if population.cbest > np.min(population.cost):
+                population.cbest = np.min(population.cost)
+                population.cbest_id = np.argmin(population.cost)
+                if population.gbest > np.min(population.cost):
+                    population.gbest = np.min(population.cost)
+                    population.gbest_solution = population.group[np.argmin(population.cost)]
+
+            population.update_M_F_Cr(SF, SCr, df)
+
+            if FEs >= k * record_period:
+                Fevs.append(population.gbest)
+                k += 1
+            if np.min(population.cost) < 1e-8:
+                return population, Fevs, min(FEs, MaxFEs)
+
+        return population, Fevs, min(FEs, MaxFEs)
+
+    def test(self, population, problem, MaxFEs, period):
+        NP = population.NP
+        k = 1
+        FEs = 0
+        Fevs = []
+        population.cost = self.evaluate(population.group, problem)
+        population.cbest = np.min(population.cost)
+        population.cbest_id = np.argmin(population.cost)
+        population.gbest = population.cbest
+        population.gbest_solution = population.group[population.cbest_id]
+        factor = population.gbest
+        FEs += NP
+        while FEs < MaxFEs:
+
+            Fs = np.random.rand(NP).repeat(self.dim).reshape(NP, self.dim)
+            Crs = 0.5 * (1 + np.random.rand(NP)).repeat(self.dim).reshape(NP, self.dim)
+
+            trail = self.mutation(population, Fs)
+            trail = self.crossover(population, trail, Crs)
+
+            if FEs + NP >= MaxFEs:
+                trail = trail[:MaxFEs - FEs]
+            costs = self.evaluate(trail, problem)
+            replace_id = np.where(costs < population.cost[:trail.shape[0]])
+            population.group[replace_id] = trail[replace_id]
+            population.cost[replace_id] = costs[replace_id]
+            FEs += NP
+
+            if population.cbest > np.min(population.cost):
+                population.cbest = np.min(population.cost)
+                population.cbest_id = np.argmin(population.cost)
+                if population.gbest > np.min(population.cost):
+                    population.gbest = np.min(population.cost)
+                    population.gbest_solution = population.group[np.argmin(population.cost)]
+
+            if FEs >= k * period:
+                Fevs.append(population.gbest / factor)
+                k += 1
+            if FEs >= MaxFEs:
+                return Fevs
+
+        return Fevs
+
+    def test_run(self,
+                 problem,  # the problem instance to be optimize
+                 MaxFEs,  # the max number of evaluations
+                 period,
+                 ):
+        population = Population(self.dim)
+        Fevs = self.test(population, problem, MaxFEs, period)
+        return Fevs
+
+
+class DE_ctr_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.current2rand(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_ctb_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.current2best(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_ctr_E(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.current2rand(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.exponential(population, trail, Crs)
+
+
+class DE_ctb_E(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.current2best(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.exponential(population, trail, Crs)
+
+
+class DE_best1_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.best1(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_best2_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.best2(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_rand1_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.rand1(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_rand2_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.rand2(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+class DE_rtb_B(basic_DE):
+    def __init__(self, dim):
+        super().__init__(dim)
+
+    def mutation(self, population, Fs):
+        return self.rand2best2(population, Fs)
+
+    def crossover(self, population, trail, Crs):
+        return self.binomial(population, trail, Crs)
+
+
+# an ensemble optimizer integrates JDE21 and NL-SHADE-RSP
+class random_optimizer:
+    def __init__(self, dim, optimizers):
+        self.dim = dim
+        self.optimizers = optimizers
+
+    # an uniform interface for testing
+    def test_run(self,
+                 problem,  # the problem instance to be optimize
+                 MaxFEs,  # the max number of evaluations
+                 period,
+                 ):
+        # initialize population and optimizers
+        population = Population(self.dim)
+        population.initialize_costs(problem)
+        factor = population.gbest
+
+        Fevs = []
+        prob = 0.5
+        end_fes = 0
+        start_time = time.time()
+        for i in range(population.NP, MaxFEs, period):
+            # randomly select an optimizer
+            population, fes, end_fes = self.optimizers[np.random.randint(len(self.optimizers))].step(population, problem, i, min(i + period, MaxFEs), MaxFEs)
+            Fevs.append(population.gbest / factor)
+            if population.gbest < 1e-8:
+                break
+        end_time = time.time()
+        while len(Fevs) < MaxFEs // period:
+            Fevs.append(1.0)
+        return Fevs
+
+
+if __name__ == '__main__':
+    np.random.seed(1)
+    dim = 2
+    MaxFEs = 400000
+    config = 7
+    problems = []
+    for i in range(50):
+        problems.append(cec_test_func.Schwefel(dim, np.random.rand(dim) * 0, np.eye(dim), 0))
+
+    de = DE_rand1_B(dim)
+    X = []
+    Y = []
+    st = time.time( )
+    for i in range(5, 200+1, 5):
+        pbar = tqdm.tqdm(total=50, desc=f"population {i} / 200: ")
+        cost = 0
+        fes = 0
+        for j in range(50):
+            np.random.seed(j + 10)
+            p = problems[j]
+            pop = Population(dim, Nmax=i)
+            pop.initialize_costs(p)
+            pop, _, f = de.step(pop, p, i, MaxFEs, MaxFEs, 5000)
+            cost += pop.gbest
+            fes += f
+            pbar.update()
+        cost /= 50
+        fes /= 50
+        pbar.close()
+        X.append(cost)
+        Y.append(fes)
+    # print(X)
+    # print(Y)
+    np.set_printoptions(suppress=True)
+    print(np.stack([range(5, 200+1, 5), X, Y]).transpose())
+    # for i in range(100):
+    #     # np.random.seed(i + 1)
+    #     p = cec_test_func.Schwefel(dim, np.random.rand(dim) * 160 - 80, cec_test_func.rotate_gen(dim), 0)
+    #     pop = Population(dim)
+    #     pop.initialize_costs(p)
+    #     pop.sort(pop.NP)
+    #     f = pop.gbest
+    #     x = de.step(pop, p, 0, MaxFEs, MaxFEs, 5000)
+    #     x = np.array(x[1])
+    #     while x.shape[0] < MaxFEs // 5000:
+    #         x = np.append(x, 0.0)
+    #     X.append(pop.gbest)
+    # # print(de.test(pop, p, MaxFEs, 2500))
+    # ed = time.time()
+    # print(ed - st)
+    # print(np.mean(X))
+
+    # problem = 'Hybrid1'
+    # agent1 = NL_SHADE_RSP(dim)
+    # agent2 = JDE21(dim)
+    # agent3 = random_optimizer(dim)
+    # res3 = Test(agent3, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res2 = Test(agent2, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res1 = Test(agent1, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # print(score_judge([res1, res2, res3]))
+
+    # problem = 'Hybrid1'
+    # agent1 = NL_SHADE_RSP(dim)
+    # agent2 = JDE21(dim)
+    # agent3 = random_optimizer(dim)
+    # res3 = Test(agent3, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res2 = Test(agent2, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res1 = Test(agent1, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # print(score_judge([res1, res2, res3]))
+    #
+    # problem = 'Composition3'
+    # agent1 = NL_SHADE_RSP(dim)
+    # agent2 = JDE21(dim)
+    # agent3 = random_optimizer(dim)
+    # res3 = Test(agent3, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res2 = Test(agent2, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # res1 = Test(agent1, cec2021, dim, MaxFEs, indicated_problem=problem, indicated_config=config)
+    # print(score_judge([res1, res2, res3]))
