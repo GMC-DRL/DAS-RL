@@ -341,9 +341,9 @@ if __name__ == '__main__':
             train_envs = VectorEnv(envs)
             batch_num = data_loader.N // data_loader.batch_size
             if rl == 'DQN':
-                total_steps = Q_train_v2(policy, train_envs, logger, epsilon, total_steps, ensemble.max_step, epoch, bid, batch_num)
+                total_steps = Q_train(policy, train_envs, logger, epsilon, total_steps, ensemble.max_step, epoch, bid, batch_num)
             else:
-                total_steps = Policy_train_v3(policy, train_envs, logger, total_steps, train_steps, k_epoch, ensemble.max_step, epoch, bid, batch_num)
+                total_steps = Policy_train(policy, train_envs, logger, total_steps, train_steps, k_epoch, ensemble.max_step, epoch, bid, batch_num)
             train_steps += k_epoch
 
             train_envs.close()
