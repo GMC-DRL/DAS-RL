@@ -1,6 +1,6 @@
 # Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution
 
-This is the python implementation of our paper "Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution", which is accepted on IEEE Transactions on Systems, Man and Cybernetics: Systems.
+This is the python implementation of our paper "Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution", which is accepted on *IEEE Transactions on Systems, Man and Cybernetics: Systems*.
 
 ## Installations
 
