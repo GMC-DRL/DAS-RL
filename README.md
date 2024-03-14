@@ -1,4 +1,4 @@
-# DAS-RL：Dynamic Algorithm Selection via Reinforcement Learning
+# Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution
 
 ## Testing.py (main entrance)
 
