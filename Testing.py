@@ -117,6 +117,7 @@ if __name__ == '__main__':
     sublength = [0.1, 0.2, 0.2, 0.2, 0.3]
     Comp_lamda = [1, 10, 1]
     Comp_sigma = [10, 20, 30]
+    indicated_dataset = None
     shifted=True
     rotated=True
     Train_set = 1024
@@ -158,10 +159,10 @@ if __name__ == '__main__':
     torch.manual_seed(torch_seed)
     data_loader = Training_Dataset(filename=None, dim=dim, num_samples=Train_set, problems=problem, biased=False, shifted=shifted, rotated=rotated,
                                    batch_size=batch_size, save_generated_data=False, problem_list=subproblems, 
-                                   problem_length=sublength, indicated_specific=True, indicated_dataset=None)
+                                   problem_length=sublength, indicated_specific=True, indicated_dataset=indicated_dataset)
     test_data = Training_Dataset(filename=None, dim=dim, num_samples=Test_set, problems=problem, biased=False, shifted=shifted, rotated=rotated,
                                  batch_size=batch_size, save_generated_data=False, problem_list=subproblems, 
-                                 problem_length=sublength, indicated_specific=True, indicated_dataset=None)
+                                 problem_length=sublength, indicated_specific=True, indicated_dataset=indicated_dataset)
     ensemble = Ensemble(optimizers, Schwefel(dim, np.random.rand(dim), np.eye(dim), 0), period, MaxFEs, sample_times, sample_size)
     np.random.seed(0)
 
