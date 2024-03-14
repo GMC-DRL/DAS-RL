@@ -4,13 +4,15 @@
 
 ### Parameter setting
 
-Edit line 454~493 to modify the setting of algorithm:
+Edit line 114 ~ 154 to modify the setting of algorithm:
 
 + VectorEnv: The environment structure, can be **env.DummyVectorEnv** for serial environment
 or **env.SubprocVectorEnv** for parallel environment (only for Linux).
 + problem: The problem to be solve, can be a str (e.g. "Schwefel") or a list of str (e.g. ["Schwefel"] and ["Schwefel", "Bent_cigar"])
 + subproblems: The list of suubproblems of Composition and Hybrid problem (e.g. ['Rastrigin', 'Happycat', 'Ackley', 'Discus', 'Rosenbrock'])
 + sublength: The partition of Hybrid problem dimensions (e.g. [0.1, 0.2, 0.2, 0.2, 0.3] with sum = 1)
++ Comp_lamda: The lamda parameters for Composition problemns
++ Comp_sigma: The sigma parameters for Composition problemns
 + indicated_dataset: Indicate a mixed dataset with a problem collection in env/training_dataset.py, it will overwrite *problem*, *subproblems* and *sublength* above. **None** for not to indicate.
 + shifted: A Bool type indicates whether to shift or not
 + rotated: A Bool type indicates whether to rotate or not
