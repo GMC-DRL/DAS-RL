@@ -487,9 +487,8 @@ if __name__ == '__main__':
     test_seed = 1
     data_gen_seed = 2
     torch_seed = 1
-    optimizers = ['NL_SHADE_RSP', 'MadDE',  'JDE21']  # 
-    # optimizers = ['DE_rand2_B', 'DE_ctb_B', 'MadDE']  # 'DE_best1_B', 'DE_rtb_B','DE_best2_B' 
-    state_dict = None  # 'save_policy_PPO/20220816T214023/PPO-20220816T214023-199.pth'
+    optimizers = ['NL_SHADE_RSP', 'MadDE',  'JDE21']
+    state_dict = None
     device = 'cuda:0'
     resume_from_log = False
     run_time = time.strftime("%Y%m%dT%H%M%S")
