@@ -1,8 +1,51 @@
 # Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution
 
-## Testing.py (main entrance)
+This is the python implementation of our paper "Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution", which is accepted on IEEE Transactions on Systems, Man and Cybernetics: Systems.
 
-### Parameter setting
+## Installations
+
+```bash
+git clone https://github.com/GMC-DRL/RL-DAS.git
+```
+
+## Requirements
+* Platform preferences: Linux (for better parallelism).
+
+The dependencies of this project are listed in `requirements.txt`. You can install them using the following command.
+```bash
+pip install -r requirements.txt
+```
+
+## Quick Start
+
+* Running
+
+```
+python Testing.py
+```
+
+The tensorboard log will be stored in log/ (need manual creation) with a file name contains the used agent and runtime (e.g. **PPO-YYYYMMDDTHHmmSS**)
+
+The saved models are in /save_policy_PPO or /save_policy_DQN with runtime file name (e.g. **YYYYMMDDTHHmmSS**). 
+
+For more adjustable configurations, please refer to [`Parameter setting`](/#Parameter-setting).
+
+
+## Citing
+```
+@article{rl-das,
+author={Guo, Hongshu and Ma, Yining and Ma, Zeyuan and Chen, Jiacheng and Zhang, Xinglin and Cao, Zhiguang and Zhang, Jun and Gong, Yue-Jiao},
+title={Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution},
+journal = {IEEE Transactions on Systems, Man and Cybernetics: Systems},
+year={2024},
+}
+```
+
+## Files and Parameters
+
+### Testing.py (main entrance)
+
+#### Parameter setting
 
 Edit line 114 ~ 154 to modify the setting of algorithm:
 
@@ -42,14 +85,6 @@ or **env.SubprocVectorEnv** for parallel environment (only for Linux).
 + terminal_error: The error value of costs indicating the end of optimization
 + state_dict: The loaded model of agent, **None** to disable it
 + device: The device of network (e.g. 'cuda:0')
-
-
-### Run
-
-Python Testing.py
-
-The tensorboard log will be stored in log/ (need manual creation) with a file name contains the used agent and runtime (e.g. **PPO-YYYYMMDDTHHmmSS**)
-The saved models are in /save_policy_PPO or /save_policy_DQN with runtime file name (e.g. **YYYYMMDDTHHmmSS**)
 
 ### ploter.py & optimizer_dist.py
 
