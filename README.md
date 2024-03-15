@@ -18,8 +18,6 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-* Running
-
 ```
 python Testing.py
 ```
@@ -28,7 +26,7 @@ The tensorboard log will be stored in log/ (need manual creation) with a file na
 
 The saved models are in /save_policy_PPO or /save_policy_DQN with runtime file name (e.g. **YYYYMMDDTHHmmSS**). 
 
-For more adjustable configurations, please refer to [`Parameter setting`](/#Parameter-setting).
+For more adjustable configurations, please refer to [Parameter setting](/#Parameter-setting).
 
 
 ## Citing
@@ -41,19 +39,15 @@ year={2024},
 }
 ```
 
-## Files and Parameters
+## Parameter setting
 
-### Testing.py (main entrance)
-
-#### Parameter setting
-
-Edit line 114 ~ 154 to modify the setting of algorithm:
+Edit line 112 ~ 155 in Testing.py (main entrance) to modify the setting of algorithm:
 
 + VectorEnv: The environment structure, can be **env.DummyVectorEnv** for serial environment
 or **env.SubprocVectorEnv** for parallel environment (only for Linux).
-+ problem: The problem to be solve, can be a str (e.g. "Schwefel") or a list of str (e.g. ["Schwefel"] and ["Schwefel", "Bent_cigar"])
-+ subproblems: The list of suubproblems of Composition and Hybrid problem (e.g. ['Rastrigin', 'Happycat', 'Ackley', 'Discus', 'Rosenbrock'])
-+ sublength: The partition of Hybrid problem dimensions (e.g. [0.1, 0.2, 0.2, 0.2, 0.3] with sum = 1)
++ problem: The problem to be solve, can be a str (e.g. "Schwefel") or a list of str (e.g. \["Schwefel"\] and \["Schwefel", "Bent_cigar"\])
++ subproblems: The list of suubproblems of Composition and Hybrid problem (e.g. \['Rastrigin', 'Happycat', 'Ackley', 'Discus', 'Rosenbrock'\])
++ sublength: The partition of Hybrid problem dimensions (e.g. \[0.1, 0.2, 0.2, 0.2, 0.3\] with sum = 1)
 + Comp_lamda: The lamda parameters for Composition problemns
 + Comp_sigma: The sigma parameters for Composition problemns
 + indicated_dataset: Indicate a mixed dataset with a problem collection in env/training_dataset.py, it will overwrite *problem*, *subproblems* and *sublength* above. **None** for not to indicate.
@@ -81,12 +75,7 @@ or **env.SubprocVectorEnv** for parallel environment (only for Linux).
 + testing_internal: The internal between two tests. Minus number for disable testing.
 + testing_seeds: The random seed of testing
 + data_gen_seed: The random seed of dataset generation
-+ optimizers: The name of backboned algorithms (e.g.['NL_SHADE_RSP', 'MadDE', 'JDE21'])
++ optimizers: The name of backboned algorithms (e.g. \['NL_SHADE_RSP', 'MadDE', 'JDE21'\])
 + terminal_error: The error value of costs indicating the end of optimization
 + state_dict: The loaded model of agent, **None** to disable it
 + device: The device of network (e.g. 'cuda:0')
-
-### ploter.py & optimizer_dist.py
-
-Plotting some pictures in paper. *optimizer_dist* plots the distribution of selected actions along optimization and *ploter* plots the picture of 2 dimension problems
-
