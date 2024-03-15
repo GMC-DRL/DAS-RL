@@ -80,6 +80,3 @@ or **env.SubprocVectorEnv** for parallel environment (only for Linux).
 + state_dict: The loaded model of agent, **None** to disable it
 + device: The device of network (e.g. 'cuda:0')
 
-## Acknowledgements
- 
-The parallel environment processing is developed based on the repo [tianshou](https://github.com/thu-ml/tianshou).
