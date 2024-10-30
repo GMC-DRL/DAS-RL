@@ -1,6 +1,6 @@
 # Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution
 
-This is the python implementation of our paper "Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution", which is accepted on *IEEE Transactions on Systems, Man and Cybernetics: Systems*.
+This is the python implementation of our paper ["Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution"](https://ieeexplore.ieee.org/abstract/document/10496708), which is accepted on *IEEE Transactions on Systems, Man and Cybernetics: Systems*. It is also integrated in our [MetaBox](https://github.com/GMC-DRL/MetaBox/tree/main).
 
 ## Installations
 
@@ -29,13 +29,17 @@ The saved models are in /save_policy_PPO or /save_policy_DQN with runtime file n
 For more adjustable configurations, please refer to [Parameter setting](/#Parameter-setting).
 
 
-## Citing
+## Citation
+If you are using RL-DAS, we would appreciate a citation. You can use the following bibtex:
 ```
 @article{rl-das,
-author={Guo, Hongshu and Ma, Yining and Ma, Zeyuan and Chen, Jiacheng and Zhang, Xinglin and Cao, Zhiguang and Zhang, Jun and Gong, Yue-Jiao},
-title={Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution},
-journal = {IEEE Transactions on Systems, Man and Cybernetics: Systems},
-year={2024},
+  author={Guo, Hongshu and Ma, Yining and Ma, Zeyuan and Chen, Jiacheng and Zhang, Xinglin and Cao, Zhiguang and Zhang, Jun and Gong, Yue-Jiao},
+  journal={IEEE Transactions on Systems, Man, and Cybernetics: Systems}, 
+  title={Deep Reinforcement Learning for Dynamic Algorithm Selection: A Proof-of-Principle Study on Differential Evolution}, 
+  year={2024},
+  volume={54},
+  number={7},
+  pages={4247-4259},
 }
 ```
 
